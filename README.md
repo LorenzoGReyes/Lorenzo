@@ -3,4 +3,10 @@
 Got an 80% on the titanic challenge on Kaggle, will probably try harder soon.
 
 
-Customer segementation is 200 obsevation data set where you clustering algorithms. Data is from kaggle.
+Customer segementation is 200 obsevation data set where you clustering algorithms. 
+
+
+Sales is some exploratory analysis and linear regression from a videogame sales database.
+
+
+All data is from kaggle.
