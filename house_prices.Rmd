@@ -1,0 +1,529 @@
+
+```{r}
+#data analysis
+library(tidyverse)
+#library(corrplot)
+library(GGally)
+library(reshape2)
+#preprocessing
+library(caret)
+
+#lasso and ridge regression
+library(glmnet)
+```
+
+
+```{r}
+#load data
+df <- read_csv("train.csv")
+#first five rows of the data
+head(df, n = 5)
+```
+
+
+```{r}
+#shape of data
+dim(df)
+```
+
+```{r}
+str(df)
+```
+
+
+```{r}
+summary(df)
+```
+```{r}
+colSums(is.na(df))
+```
+
+A lot of missing values, we'll take care of them later.
+
+```{r}
+which(is.na(df$MasVnrType))
+```
+
+```{r}
+stat.desc(df)
+```
+We want to predict the sale price of each propery so we begin by plotting that variable
+
+```{r}
+ggplot(data = df) + geom_histogram(mapping = aes(x = df$SalePrice), bins = 50, fill = "#3146e1", col = "#df9141", alpha = 0.5) + labs(title = "Histogram for Sale Price", x = "Sale Price", y = "Count") + scale_x_continuous(breaks = seq(min(df$SalePrice), max(df$SalePrice), 100000)) + scale_y_continuous(breaks = seq(0, 200, 10)) 
+```
+
+The last bin seems quite big compared to the ones that are on the right tail.
+```{r}
+sort(df$SalePrice, decreasing = TRUE)[1:5]
+```
+We don't have any house between 745000 and 625000, that's why the data seems a little bit weird.
+
+```{r}
+filter(df, SalePrice > 600000)
+```
+Despite the really high prices of these houses i don't think they're outliers, so there's no need to remove them. 
+
+```{r}
+#correlation for sale price
+sort(cor(select_if(df, is_numeric))[, "SalePrice"], decreasing = TRUE)
+```
+
+We have 81 total features so we'll not plot everything. We begin by plotting the variables with a higher correlation to sale price.
+
+```{r}
+#new dataframe with only a subset of the features
+df.corr <- df[, c("SalePrice", "OverallQual", "GarageCars", "GarageArea", "TotalBsmtSF", "1stFlrSF", 
+                   "OverallCond", "MSSubClass", "EnclosedPorch", "KitchenAbvGr")]
+
+#plot this new dataframe
+ggpairs(df.corr, progress = FALSE)
+```
+Seems like there's a polynomial relationship between SalePrice and the other variables. Let's check some of these relationships a little bit closer.
+
+```{r}
+ggplot(data=df,mapping = aes(x = as.factor(df$OverallQual), y = df$SalePrice, fill = as.factor(df$OverallQual))) + geom_boxplot() + labs(x = "Overall Quality", y = "Sale Price")
+```
+Higher quality of the materials the more expensive the house.
+
+
+```{r}
+#plot
+ggplot(data=df, mapping = aes(x=df.corr$SalePrice, y=df$GarageArea, color=as.factor(df$OverallQual))) +
+        geom_jitter() + labs(x = "Sale Price", y ="Garege Area", caption = "Overall Quality") 
+```
+Houses with a bigger garage tend to be more expensive, that's probably because bigger garages usually mean bigger properties. Also, it seems like houses with big garages tend to have higher quality materials. 
+
+Let's look at the relation between Garage Area and Lot Area. 
+
+```{r}
+set.seed(0)
+df.sample <- df[sample(nrow(df), 300), ]
+#plot
+ggplot(data = df.sample, mapping = aes(x = LotArea, y = GarageArea)) + geom_jitter() +
+      labs(x = "Lot Area", y = "Garage Area")
+```
+We can remove the extreme point.
+
+```{r}
+#plot
+ggplot(data = df.sample[!(df.sample$LotArea == max(df.sample$LotArea)),], mapping = aes(x = LotArea, y = GarageArea)) + geom_jitter() +
+      labs(x = "Lot Area", y = "Garage Area")
+```
+Much better. It's quite clear that the two variables have a positive correlation but not even close to one.
+
+I expect that houses with a big 1st floor have a big garage and a high price, let's plot it.
+
+```{r}
+ggplot(data = df.sample[!(df.sample$`1stFlrSF` == max(df.sample$`1stFlrSF`)),], mapping = aes(x = `1stFlrSF`, y = GarageArea)) + geom_jitter(alpha = 1, size = 3, aes(colour = SalePrice)) + labs(x = "First Floor Square Feet", y = "Garage Area") + scale_color_gradient(low = "#04ecff", high = "#ff0404", name = "Sale Price")
+```
+Just as we expected.
+
+To finalize this exploratory analysis i'd like to get a closer look at the Sale Price distribution. I'll not use a sample of the data in this example for obvious reasons.
+
+
+We have a lot of columns that we haven't taken a look at, nobody is paying me for this so i'll leave it out for later. There a lot of redundant features on our data and we can creaate some new ones.
+
+We take a look at the correlations between all the variables.
+```{r}
+cormat <- round(cor(select_if(df, is.numeric)),2)
+melted.df <- melt(cormat)
+
+#plot
+ggplot(data = melted.df, aes(x=Var1, y=Var2, fill=value)) + geom_tile() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1), axis.text.y = element_text(angle = 0, vjust = 0, hjust = 1)) + scale_fill_gradient(low="#04ecff", high="#ff0404")
+```
+
+We have some highly correlated variables so we delete "GarageCars", "TotRmsAbvGrd" and "TotalBsmtSF".
+```{r}
+#remove columns
+df <- df %>% select(-one_of("GarageCars", "TotRmsAbvGrd", "TotalBsmtSF", "Id"))
+```
+
+We have some missing values in some columns. 
+```{r}
+#count missing values 
+colSums(is.na(df))
+```
+There are some columns that are missing most of the data so we delete them too.
+
+```{r}
+df <- df %>% select(-one_of("MiscFeature", "Fence", "PoolQC", "FireplaceQu", "Alley"))
+```
+
+There are some columns that are missing a little bit of data. For example GarageType, GarageFinish, GarageYrBlt GarageQual and GarageCond are all missing 81 values, those are probably the houses that have no garage. Similar logic will be applied to some of the other missing values.
+```{r}
+colSums(is.na(df))
+```
+LotFrontage, BsmtQual
+
+```{r}
+#select column and replace missing values
+df$LotFrontage[which(is.na(df$LotFrontage))] <- 0
+```
+
+I don't know how to deal with all the missing values in the GarageYrBlt. I'll just delete it, we have enough info on the garages anyway.
+```{r}
+df <- df %>% select(-("GarageYrBlt"))
+```
+
+GarageType, GarageFinish, GarageQual and GarageCond are missing the same values.
+```{r}
+c(length(df$GarageFinish[which(is.na(df$GarageType))]), length(df$GarageQual[which(is.na(df$GarageType))]), length(df$GarageCond[which(is.na(df$GarageType))]))
+```
+I'll add a 0 where one of these columns has a missing value.
+
+```{r}
+df[which(is.na(df$GarageType)),c("GarageFinish", "GarageType", "GarageQual", "GarageCond")] <- c(0,0,0,0)
+```
+
+Let's replace  the missing values of MasVnrType and MasVnrArea with "None" and 0. I think in this case the missing values are actually not available but there are only 8 missing so it's not a big deal, another option would be removing the rows.
+
+```{r}
+df[which(is.na(df$MasVnrType)), c("MasVnrType", "MasVnrArea")] <- c("None", 0)
+```
+
+Something weird is going on with BsmtQual, BsmtCond, BsmtExposure, BsmtFinType1 and BsmtFinType2. Some of them have 38 missing values and the others have 37 missing values.
+```{r}
+c(length(which(is.na(df$BsmtQual))), length(which(is.na(df$BsmtCond))), length(which(is.na(df$BsmtExposure))), length(which(is.na(df$BsmtFinType1))), length(which(is.na(df$BsmtFinType2))))
+```
+
+```{r}
+length(intersect(intersect(which(is.na(df$BsmtQual)), which(is.na(df$BsmtCond))), which(is.na(df$BsmtFinType1))))
+```
+
+```{r}
+length(intersect(which(is.na(df$BsmtExposure)), which(is.na(df$BsmtFinType2))))
+```
+In the first case they are missing the same values but in the second case there's two observations in which they're both different.
+
+```{r}
+#difference between the two sets
+c(setdiff(which(is.na(df$BsmtFinType2)), which(is.na(df$BsmtExposure))), setdiff(which(is.na(df$BsmtExposure)), which(is.na(df$BsmtFinType2))))
+```
+So in observation 333 BsmtFinType2 is missing and in observation 949 BsmtExposure is missing. Let's fill the missing values with the most common value.
+
+```{r}
+#function to select the mode
+getmode <- function(v){
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+```
+
+
+```{r}
+#replace values
+df[949, "BsmtExposure"] <- getmode(df$BsmtExposure)
+df[333, "BsmtFinType2"] <- getmode(df$BsmtFinType2)
+```
+
+All of those rows are missing the same features. Let's take a closer look at them, maybe we can find some pattern that's help us filling the missing values.
+
+```{r}
+df[which(is.na(df$BsmtExposure)),]
+```
+All of these observations have a 0 in the BsmtFinSF1 and BsmtFinSF2 feature. Let's filter all these observations.
+
+```{r}
+df2 <- df %>% filter(BsmtFinSF1 == 0 & BsmtFinSF2 == 0)
+df2
+```
+Most of these houses seen quite similar, i'll just fill the missing values with the mode of each feature.
+
+```{r}
+df[which(is.na(df$BsmtExposure)),c("BsmtQual", "BsmtCond", "BsmtExposure", "BsmtFinType1", "BsmtFinSF1", 
+                                   "BsmtFinType2")] <- c(getmode(df2$BsmtQual), getmode(df2$BsmtCond), 
+                                                         getmode(df2$BsmtExposure), getmode(df2$BsmtFinType1),
+                                                         getmode(df$BsmtFinSF1), getmode(df$BsmtFinType2))
+```
+For some weird reason there's only one electrical missing value.
+
+```{r}
+df[which(is.na(df$Electrical)),]
+```
+It seems like a normal house so i'll just fill the missing value with the mode.
+```{r}
+df[1380, "Electrical"] <- getmode(df$Electrical)
+```
+
+For some weird reason we have some weird values.
+
+```{r}
+df[df$MasVnrArea == "None", "MasVnrArea"] <- 0 
+df[which(is.na(as.numeric(df$"BsmtFinSF1"))), "BsmtFinSF1"] <- 0
+```
+
+
+```{r}
+df$Neighborhood[df$Neighborhood == "Blueste"] <- getmode(df$Neighborhood)
+```
+
+Most of the house have the same value in Condition2, ExterCond and RoofMat1. Exterior1st and Exterior2nd have a lot houses with small frequencies.
+```{r}
+df <- select(df, -c( "Condition2", "ExterCond", "RoofMatl", "Exterior1st", "Exterior2nd"))
+```
+
+
+Before trying to predict sale price for a house, we split the data into validation, training and test set.
+
+```{r}
+#random seed
+set.seed(0)
+
+#split data
+spec <- c(training = 0.58, validation = 0.21, testing = 0.21)
+
+g <- sample(cut(seq(nrow(df)), nrow(df)*cumsum(c(0, spec)), labels = names(spec)))
+
+df.final <- split(df, g)
+```
+ We will standarize, normalize and encode the variables.
+
+```{r}
+#features to scale
+scaling <- c("YearBuilt", "YearRemodAdd", "OverallQual", "OverallCond", "YrSold", "MSSubClass")
+#scaling
+scale <- preProcess(df.final$training[, scaling], method = c("range"))
+
+#replace
+df.final$training[, scaling] <- predict(scale, df.final$training[,scaling])
+df.final$validation[, scaling] <- predict(scale, df.final$validation[, scaling])
+df.final$testing[, scaling] <- predict(scale, df.final$testing[, scaling])
+```
+
+
+```{r}
+#features to standarize
+standarize <- c("LotFrontage", "LotArea", "MasVnrArea", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "1stFlrSF", "2ndFlrSF", "LowQualFinSF", "GrLivArea", "GarageArea", "OpenPorchSF", "WoodDeckSF", "EnclosedPorch", "3SsnPorch", "PoolArea", "MiscVal", "MoSold", "ScreenPorch")
+#switch datatypes
+df.final$training[, standarize]  <- lapply(df.final$training[, standarize], as.numeric)
+df.final$validation[, standarize] <- lapply(df.final$validation[, standarize], as.numeric)
+df.final$testing[, standarize] <- lapply(df.final$testing[, standarize], as.numeric)
+
+#standarized
+standard <- preProcess(df.final$training[, standarize], method = c("center", "scale"))
+
+#replace
+df.final$training[, standarize] <- predict(standard, df.final$training[, standarize])
+df.final$validation[, standarize] <- predict(standard, df.final$validation[, standarize])
+df.final$testing[, standarize] <- predict(standard, df.final$testing[, standarize])
+```
+R takes care of the categorical variables on it's own so no need to take care of that. All the variables must have the same levels.
+
+```{r}
+for (f in 1:length(names(df))) {
+  levels(df.final$training[, f]) <- levels(df[, f])
+  levels(df.final$validation[, f]) <- levels(df[, f])
+  levels(df.final$testing[, f]) <- levels(df[, f])
+}
+```
+
+
+We begin with a simple linear regression.
+
+```{r}
+lm.fit <- lm(data = df.final$training, formula = SalePrice~.)
+```
+
+```{r}
+summary(lm.fit)
+```
+
+
+Mean squared error
+```{r}
+sqrt(mean(lm.fit$residuals^2))
+```
+
+
+```{r}
+#predict
+y.pred = predict(lm.fit, newdata = df.final$validation)
+
+#rmse
+sqrt(mean((y.pred - df.final$validation$SalePrice)^2))
+```
+
+Not that bad but we can try more complex methods with a higher accuracy. I don't want to use a lot of variables because i want my model to be easy to interpretate so i'll pick the variables with the highest p-values.
+
+```{r}
+#variables with a high p-value
+cols <- c("PoolArea", "GarageArea", "KitchenQual", "BedroomAbvGr", "1stFlrSF", "2ndFlrSF", "BsmtUnfSF", "BsmtFinSF1", "BsmtFinSF2", "BsmtExposure", "ExterQual", "MSZoning", "LotArea", "SalePrice")
+
+#new datasets
+df.training <- select(df.final$training,all_of(cols))
+df.validation <- select(df.final$validation, all_of(cols))
+df.testing <- select(df.final$testing, all_of(cols))
+
+```
+
+
+```{r}
+#linear regression
+lm2.fit <- lm(data = df.training, formula = SalePrice~.)
+```
+
+```{r}
+summary(lm2.fit)
+```
+
+```{r}
+#predict
+y.pred <- predict(lm2.fit, newdata = df.validation)
+
+#rmse
+sqrt(mean((y.pred - df.validation$SalePrice)^2))
+```
+It's a little bit worse, but the data is smaller so i'll keep working with this data.
+
+Now we try polynomial regression
+```{r}
+poly.fit <- lm(data = df.training, SalePrice ~ BedroomAbvGr + BsmtExposure + ExterQual + MSZoning + PoolArea+ GarageArea + `1stFlrSF` + `2ndFlrSF`+ BsmtUnfSF + BsmtFinSF1 + BsmtFinSF2 + LotArea + I(PoolArea*GarageArea) + I(PoolArea*`1stFlrSF`) + I(PoolArea*`2ndFlrSF`) + I(PoolArea*BsmtUnfSF) + I(PoolArea*BsmtFinSF1) + I(PoolArea*BsmtFinSF2) + I(PoolArea*LotArea) + I(GarageArea*`1stFlrSF`) + I(GarageArea*`2ndFlrSF`) + I(GarageArea*BsmtUnfSF) + I(GarageArea*BsmtFinSF1) + I(GarageArea*BsmtFinSF2) + I(GarageArea*LotArea) + I(`1stFlrSF`*`2ndFlrSF`) + I(`1stFlrSF`*BsmtUnfSF) + I(`1stFlrSF`*BsmtFinSF1) + I(`1stFlrSF`*BsmtFinSF2) + I(`1stFlrSF`*LotArea) + I(`2ndFlrSF`*BsmtUnfSF) + I(`2ndFlrSF`*BsmtFinSF1) + I(`2ndFlrSF`*BsmtFinSF2) + I(`1stFlrSF`*LotArea) + I(BsmtUnfSF*BsmtFinSF1) + I(BsmtUnfSF*BsmtFinSF2) + I(BsmtUnfSF*LotArea) + I(BsmtFinSF1*BsmtFinSF2) + I(BsmtFinSF1*LotArea) + I(BsmtFinSF2*LotArea) + I(PoolArea^2) + I(GarageArea^2) + I(`1stFlrSF`^2) + I(`2ndFlrSF`^2) + I(BsmtUnfSF^2) + I(BsmtFinSF1^2) + I(BsmtFinSF2^2) + I(LotArea^2))
+```
+
+```{r}
+summary(poly.fit)
+```
+
+```{r}
+#predict
+poly.pred <- predict(poly.fit, df.validation)
+
+#rmse
+sqrt(mean((poly.pred - df.validation$SalePrice)^2))
+```
+
+It's worse so we try other model. First let's try ridge regression.
+
+```{r}
+#hyperparameter
+grid = 10^(seq(-10, -20, length = 10))
+
+#for using glmnet
+X <- model.matrix(SalePrice~., data = df.training)
+y = df.training$SalePrice
+#testing
+X.val <- model.matrix(SalePrice~., data = df.validation)
+y.val <- df.validation$SalePrice
+
+#ridge regression
+ridge.mod <- glmnet(x =X, y = y, alpha = 0, lambda = grid, standardize = FALSE)
+```
+
+
+```{r}
+list <- list()
+for (n in 1:length(grid)){
+  ridge.pred <- predict(ridge.mod, s = n, newx = X.val)
+  error = sqrt(mean((y.val - ridge.pred)^2))
+  list <- c(list, error)
+}
+list
+```
+
+Not much better, now we try lasso regression.
+```{r}
+#lasso
+lasso.mod <- glmnet(x = X, y = y, alpha = 1, lambda = grid, standardize = FALSE)
+```
+
+
+```{r}
+list <- list()
+for (n in 1:length(grid)){
+  ridge.pred <- predict(lasso.mod, s = n, newx = X.val)
+  error = sqrt(mean((y.val - ridge.pred)^2))
+  list <- c(list, error)
+}
+list
+```
+
+Not much better. We now try some splines.
+
+```{r}
+splines.mod.7 <- lm(SalePrice~bs(PoolArea, df = 7) + bs(GarageArea, df = 7) + KitchenQual + BedroomAbvGr + bs(`1stFlrSF`, 7) + bs(`2ndFlrSF`, df = 7) + bs(BsmtUnfSF, df = 7) + bs(BsmtFinSF1, df = 7) + bs(BsmtFinSF2, df = 7) + BsmtExposure + ExterQual + MSZoning + bs(LotArea, df = 7), data = df.training)
+
+splines.mod.6 <- lm(SalePrice~bs(PoolArea, df = 6) + bs(GarageArea, df = 6) + KitchenQual + BedroomAbvGr + bs(`1stFlrSF`, 6) + bs(`2ndFlrSF`, df = 6) + bs(BsmtUnfSF, df = 6) + bs(BsmtFinSF1, df = 6) + bs(BsmtFinSF2, df = 6) + BsmtExposure + ExterQual + MSZoning + bs(LotArea, df = 6), data = df.training)
+
+splines.mod.5 <- lm(SalePrice~bs(PoolArea, df = 5) + bs(GarageArea, df = 5) + KitchenQual + BedroomAbvGr + bs(`1stFlrSF`, 5) + bs(`2ndFlrSF`, df = 5) + bs(BsmtUnfSF, df = 5) + bs(BsmtFinSF1, df = 5) + bs(BsmtFinSF2, df = 5) + BsmtExposure + ExterQual + MSZoning + bs(LotArea, df = 5), data = df.training)
+
+splines.mod.4 <- lm(SalePrice~bs(PoolArea, df = 4) + bs(GarageArea, df = 4) + KitchenQual + BedroomAbvGr + bs(`1stFlrSF`, 4) + bs(`2ndFlrSF`, df = 4) + bs(BsmtUnfSF, df = 4) + bs(BsmtFinSF1, df = 4) + bs(BsmtFinSF2, df = 4) + BsmtExposure + ExterQual + MSZoning + bs(LotArea, df = 4), data = df.training)
+
+```
+
+Let's compare these models with the validation set.
+
+```{r}
+splines.pred.7 <- predict(splines.mod.7, df.validation)
+splines.pred.6 <- predict(splines.mod.6, df.validation)
+splines.pred.5 <- predict(splines.mod.5, df.validation)
+splines.pred.4 <- predict(splines.mod.4, df.validation)
+
+
+#rmse
+sqrt(mean((splines.pred.7 - df.validation$SalePrice)^2))
+sqrt(mean((splines.pred.6 - df.validation$SalePrice)^2))
+sqrt(mean((splines.pred.5 - df.validation$SalePrice)^2))
+sqrt(mean((splines.pred.4 - df.validation$SalePrice)^2))
+
+```
+The best one is the one with 5 splines. Now we try with natural splines.
+
+```{r}
+natural.mod.7 <- lm(SalePrice~ns(PoolArea, df = 7) + ns(GarageArea, df = 7) + KitchenQual + BedroomAbvGr + ns(`1stFlrSF`, 7) + ns(`2ndFlrSF`, df = 7) + ns(BsmtUnfSF, df = 7) + bs(BsmtFinSF1, df = 7) + ns(BsmtFinSF2, df = 7) + BsmtExposure + ExterQual + MSZoning + ns(LotArea, df = 7), data = df.training)
+
+natural.mod.6 <- lm(SalePrice~ns(PoolArea, df = 6) + ns(GarageArea, df = 6) + KitchenQual + BedroomAbvGr + ns(`1stFlrSF`, 6) + ns(`2ndFlrSF`, df = 6) + ns(BsmtUnfSF, df = 6) + ns(BsmtFinSF1, df = 6) + ns(BsmtFinSF2, df = 6) + BsmtExposure + ExterQual + MSZoning + ns(LotArea, df = 6), data = df.training)
+
+natural.mod.5 <- lm(SalePrice~bs(PoolArea, df = 5) + ns(GarageArea, df = 5) + KitchenQual + BedroomAbvGr + ns(`1stFlrSF`, 5) + ns(`2ndFlrSF`, df = 5) + bs(BsmtUnfSF, df = 5) + ns(BsmtFinSF1, df = 5) + ns(BsmtFinSF2, df = 5) + BsmtExposure + ExterQual + MSZoning + ns(LotArea, df = 5), data = df.training)
+
+natural.mod.4 <- lm(SalePrice~ns(PoolArea, df = 4) + ns(GarageArea, df = 4) + KitchenQual + BedroomAbvGr + ns(`1stFlrSF`, 4) + ns(`2ndFlrSF`, df = 4) + ns(BsmtUnfSF, df = 4) + ns(BsmtFinSF1, df = 4) + ns(BsmtFinSF2, df = 4) + BsmtExposure + ExterQual + MSZoning + ns(LotArea, df = 4), data = df.training)
+```
+
+
+```{r}
+natural.pred.7 <- predict(natural.mod.7, df.validation)
+natural.pred.6 <- predict(natural.mod.6, df.validation)
+natural.pred.5 <- predict(natural.mod.5, df.validation)
+natural.pred.4 <- predict(natural.mod.4, df.validation)
+
+
+#rmse
+sqrt(mean((natural.pred.7 - df.validation$SalePrice)^2))
+sqrt(mean((natural.pred.6 - df.validation$SalePrice)^2))
+sqrt(mean((natural.pred.5 - df.validation$SalePrice)^2))
+sqrt(mean((natural.pred.4 - df.validation$SalePrice)^2))
+```
+Last one has a lower rmse than all these natural splines.
+
+```{r}
+smoothing.mod.2 <- gam(SalePrice~s(GarageArea, 2) + PoolArea + KitchenQual + BedroomAbvGr + s(`1stFlrSF`,  2) + s(`2ndFlrSF`, 2) + s(BsmtUnfSF, 2) + s(BsmtFinSF1, 2) + s(BsmtFinSF2,  2) + BsmtExposure + ExterQual + MSZoning + s(LotArea, 2), data = df.training)
+smoothing.mod.3 <- gam(SalePrice~s(GarageArea, 3) + PoolArea + KitchenQual + BedroomAbvGr + s(`1stFlrSF`,  3) + s(`2ndFlrSF`, 3) + s(BsmtUnfSF, 3) + s(BsmtFinSF1, 3) + s(BsmtFinSF2,  3) + BsmtExposure + ExterQual + MSZoning + s(LotArea, 3), data = df.training)
+smoothing.mod.4 <- gam(SalePrice~s(GarageArea, 4) + PoolArea +  KitchenQual + BedroomAbvGr + s(`1stFlrSF`,  4) + s(`2ndFlrSF`, 4) + s(BsmtUnfSF, 4) + s(BsmtFinSF1, 4) + s(BsmtFinSF2,  4) + BsmtExposure + ExterQual + MSZoning + s(LotArea, 4), data = df.training)
+```
+
+
+```{r}
+smoothing.pred.2 <- predict(smoothing.mod.2, df.validation)
+smoothing.pred.3 <- predict(smoothing.mod.3, df.validation)
+smoothing.pred.4 <- predict(smoothing.mod.4, df.validation)
+
+
+
+#rmse
+sqrt(mean((smoothing.pred.2 - df.validation$SalePrice)^2))
+sqrt(mean((smoothing.pred.3 - df.validation$SalePrice)^2))
+sqrt(mean((smoothing.pred.4 - df.validation$SalePrice)^2))
+
+```
+Not better.
+
+```{r}
+splines.pred.final <- predict(splines.mod.6, df.testing)
+```
+
+
+```{r}
+sqrt(mean((splines.pred.final - df.testing$SalePrice)^2))
+```
+
+This is not good but i got other import stuff to do so i'll leave it this way.
